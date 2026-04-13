@@ -46,7 +46,7 @@ _running = True
 
 def _handle_signal(sig: int, _frame: Any) -> None:
     global _running
-    log.info("Received signal %s, shutting down", sig)
+    log.info(f"Received signal {sig}, shutting down")
     _running = False
 
 
@@ -76,16 +76,10 @@ def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.Recor
     entry_filter: dict[str, Any] = {}
     if since is not None:
         entry_filter["start"] = since + timedelta(seconds=1)
-    log.info(
-        "Fetching records%s",
-        f" since {since.isoformat()}" if since else " (full history)",
-    )
+    suffix = f" since {since.isoformat()}" if since else " (full history)"
+    log.info(f"Fetching records{suffix}")
     history = aranet4.client.get_all_records(mac, entry_filter=entry_filter)
-    log.info(
-        "Received %d records (%d on device)",
-        len(history.value),
-        history.records_on_device,
-    )
+    log.info(f"Received {len(history.value)} records ({history.records_on_device} on device)")
     return history.value
 
 
@@ -143,11 +137,8 @@ def connect_mqtt() -> mqtt.Client:
             if attempt == CONNECT_RETRIES:
                 raise
             log.warning(
-                "MQTT connect attempt %d/%d failed: %s — retrying in %ds",
-                attempt,
-                CONNECT_RETRIES,
-                exc,
-                CONNECT_RETRY_DELAY,
+                f"MQTT connect attempt {attempt}/{CONNECT_RETRIES} failed: {exc}"
+                f" — retrying in {CONNECT_RETRY_DELAY}s"
             )
             time.sleep(CONNECT_RETRY_DELAY)
     client.loop_start()
@@ -168,12 +159,12 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
 
     log.info("Starting aranet-to-mqtt bridge")
-    log.info("  Device MAC : %s", ARANET_MAC)
+    log.info(f"  Device MAC : {ARANET_MAC}")
     use_tls = MQTT_TLS if MQTT_TLS is not None else (MQTT_PORT == 8883)
-    log.info("  MQTT broker: %s:%d (TLS: %s)", MQTT_HOST, MQTT_PORT, use_tls)
-    log.info("  Topic      : %s/%s/measurement", MQTT_TOPIC_PREFIX, DEVICE_NAME)
-    log.info("  Poll every : %ds", POLL_INTERVAL)
-    log.info("  State file : %s", STATE_FILE)
+    log.info(f"  MQTT broker: {MQTT_HOST}:{MQTT_PORT} (TLS: {use_tls})")
+    log.info(f"  Topic      : {MQTT_TOPIC_PREFIX}/{DEVICE_NAME}/measurement")
+    log.info(f"  Poll every : {POLL_INTERVAL}s")
+    log.info(f"  State file : {STATE_FILE}")
 
     client = connect_mqtt()
 
@@ -201,7 +192,7 @@ def main() -> None:
 
             if latest:
                 save_state(latest)
-                log.info("Synced up to %s", latest.isoformat())
+                log.info(f"Synced up to {latest.isoformat()}")
 
             _sleep(POLL_INTERVAL)
     finally:
