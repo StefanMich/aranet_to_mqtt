@@ -97,7 +97,12 @@ def publish_records(
     """
     topic = f"{MQTT_TOPIC_PREFIX}/{DEVICE_NAME}/measurement"
     latest: datetime | None = None
+    published = 0
     for i, rec in enumerate(records, 1):
+        latest = rec.date
+        if rec.co2 < 0:
+            log.debug(f"Skipping record {rec.date} with invalid radon value {rec.co2}")
+            continue
         payload = json.dumps(
             {
                 "timestamp": rec.date.isoformat(),
@@ -111,10 +116,13 @@ def publish_records(
         info.wait_for_publish(timeout=PUBLISH_TIMEOUT)
         if not info.is_published():
             raise TimeoutError(f"MQTT publish timed out after {PUBLISH_TIMEOUT}s")
-        latest = rec.date
-        if i % BATCH_CHECKPOINT_SIZE == 0:
+        published += 1
+        if published % BATCH_CHECKPOINT_SIZE == 0:
             save_state(latest)
-            log.info("Checkpoint at %d/%d records", i, len(records))
+            log.info(f"Checkpoint at {i}/{len(records)} records")
+    skipped = len(records) - published
+    if skipped:
+        log.info(f"Skipped {skipped} records with invalid measurements")
     return latest
 
 
