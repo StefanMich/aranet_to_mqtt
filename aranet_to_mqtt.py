@@ -84,6 +84,20 @@ def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.Recor
 
 
 BATCH_CHECKPOINT_SIZE = 100
+NO_DATA_SENTINEL = -1
+
+
+def _has_invalid_reading(rec: aranet4.client.RecordItem) -> bool:
+    """Return True if any sensor field contains the aranet4 no-data sentinel."""
+    return any(
+        v == NO_DATA_SENTINEL
+        for v in (
+            rec.temperature,
+            rec.humidity,
+            rec.pressure,
+            rec.radon_concentration,
+        )
+    )
 
 
 def publish_records(
@@ -100,8 +114,8 @@ def publish_records(
     published = 0
     for i, rec in enumerate(records, 1):
         latest = rec.date
-        if rec.co2 < 0:
-            log.debug(f"Skipping record {rec.date} with invalid radon value {rec.co2}")
+        if _has_invalid_reading(rec):
+            log.debug(f"Skipping record {rec.date} with invalid sensor values")
             continue
         payload = json.dumps(
             {
@@ -109,7 +123,7 @@ def publish_records(
                 "temperature": rec.temperature,
                 "humidity": rec.humidity,
                 "pressure": rec.pressure,
-                "radon": rec.co2,
+                "radon": rec.radon_concentration,
             }
         )
         info = client.publish(topic, payload, qos=1)
