@@ -159,8 +159,7 @@ def connect_mqtt() -> mqtt.Client:
             if attempt == CONNECT_RETRIES:
                 raise
             log.warning(
-                f"MQTT connect attempt {attempt}/{CONNECT_RETRIES} failed: {exc}"
-                f" — retrying in {CONNECT_RETRY_DELAY}s"
+                f"MQTT connect attempt {attempt}/{CONNECT_RETRIES} failed: {exc} — retrying in {CONNECT_RETRY_DELAY}s"
             )
             time.sleep(CONNECT_RETRY_DELAY)
     client.loop_start()
