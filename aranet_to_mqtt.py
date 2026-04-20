@@ -78,9 +78,21 @@ def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.Recor
         entry_filter["start"] = since + timedelta(seconds=1)
     suffix = f" since {since.isoformat()}" if since else " (full history)"
     log.info(f"Fetching records{suffix}")
-    history = aranet4.client.get_all_records(mac, entry_filter=entry_filter)
-    log.info(f"Received {len(history.value)} records ({history.records_on_device} on device)")
-    return history.value
+    last_exc: Exception | None = None
+    for attempt in range(1, CONNECT_RETRIES + 1):
+        try:
+            history = aranet4.client.get_all_records(mac, entry_filter=entry_filter)
+            log.info(f"Received {len(history.value)} records ({history.records_on_device} on device)")
+            return history.value
+        except Exception as exc:
+            last_exc = exc
+            if attempt == CONNECT_RETRIES:
+                break
+            log.warning(
+                f"BLE fetch attempt {attempt}/{CONNECT_RETRIES} failed: {exc} — retrying in {CONNECT_RETRY_DELAY}s"
+            )
+            time.sleep(CONNECT_RETRY_DELAY)
+    raise RuntimeError(f"BLE fetch failed after {CONNECT_RETRIES} attempts") from last_exc
 
 
 BATCH_CHECKPOINT_SIZE = 100
