@@ -49,6 +49,14 @@ The `/data` volume persists sync state across restarts.
 | `POLL_INTERVAL` | `300` | Seconds between fetch cycles |
 | `STATE_FILE` | `/data/state.json` | Path to the sync state file |
 | `PUBLISH_TIMEOUT` | `30` | Per-message MQTT publish timeout in seconds |
+| `CONNECT_RETRIES` | `5` | BLE/MQTT connection attempts before giving up |
+| `CONNECT_RETRY_DELAY` | `10` | Seconds between connection retries |
+| `BLE_FETCH_TIMEOUT` | `120` | Seconds before a hung BLE fetch is aborted and retried |
+
+On repeated BLE failure, one poll cycle can stall for up to
+`CONNECT_RETRIES × BLE_FETCH_TIMEOUT + (CONNECT_RETRIES - 1) × CONNECT_RETRY_DELAY`
+seconds before the fetch is abandoned. With defaults that is 640 s (~10.7 min),
+followed by the normal `POLL_INTERVAL` wait before the next cycle.
 
 ## MQTT topic
 
@@ -149,4 +157,5 @@ kubectl label node <node-name> bluetooth=true
 uv sync
 uv run ruff check .
 uv run ruff format --check .
+uv run pytest
 ```

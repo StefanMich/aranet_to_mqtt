@@ -15,6 +15,9 @@ jobs:
 
       - run: uv sync --frozen --only-group dev
 
+      - name: Unit tests
+        run: uv run pytest
+
       - name: Ruff lint
         run: uv run ruff check .
 
