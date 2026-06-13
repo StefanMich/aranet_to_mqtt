@@ -140,16 +140,16 @@ def publish_records(
     client: mqtt.Client,
     records: list[aranet4.client.RecordItem],
 ) -> datetime | None:
-    """Publish records to MQTT and return the latest timestamp.
+    """Publish records to MQTT and return the last successfully published timestamp.
 
-    Saves state every BATCH_CHECKPOINT_SIZE records so that a crash
+    Saves state every BATCH_CHECKPOINT_SIZE publishes so that a crash
     mid-batch only requires re-sending the tail, not the full batch.
+    Skipped invalid records do not advance the sync cursor.
     """
     topic = f"{MQTT_TOPIC_PREFIX}/{DEVICE_NAME}/measurement"
-    latest: datetime | None = None
+    last_published: datetime | None = None
     published = 0
     for i, rec in enumerate(records, 1):
-        latest = rec.date
         if _has_invalid_reading(rec):
             log.debug(f"Skipping record {rec.date} with invalid sensor values")
             continue
@@ -166,14 +166,15 @@ def publish_records(
         info.wait_for_publish(timeout=PUBLISH_TIMEOUT)
         if not info.is_published():
             raise TimeoutError(f"MQTT publish timed out after {PUBLISH_TIMEOUT}s")
+        last_published = rec.date
         published += 1
         if published % BATCH_CHECKPOINT_SIZE == 0:
-            save_state(latest)
+            save_state(last_published)
             log.info(f"Checkpoint at {i}/{len(records)} records")
     skipped = len(records) - published
     if skipped:
         log.info(f"Skipped {skipped} records with invalid measurements")
-    return latest
+    return last_published
 
 
 def connect_mqtt() -> mqtt.Client:
