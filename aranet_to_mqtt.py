@@ -78,6 +78,8 @@ async def _fetch_all_records_async(
     mac: str,
     entry_filter: dict[str, Any],
 ) -> aranet4.client.Record:
+    # Uses aranet4 private API _all_records (validated against aranet4>=2.6.0).
+    # Prefer a public timeout-aware API upstream if aranet4 adds one.
     async with asyncio.timeout(BLE_FETCH_TIMEOUT):
         return await aranet4.client._all_records(mac, entry_filter, remove_empty=False)
 
@@ -219,6 +221,7 @@ def main() -> None:
     log.info(f"  MQTT broker: {MQTT_HOST}:{MQTT_PORT} (TLS: {use_tls})")
     log.info(f"  Topic      : {MQTT_TOPIC_PREFIX}/{DEVICE_NAME}/measurement")
     log.info(f"  Poll every : {POLL_INTERVAL}s")
+    log.info(f"  BLE timeout: {BLE_FETCH_TIMEOUT}s")
     log.info(f"  State file : {STATE_FILE}")
 
     client = connect_mqtt()

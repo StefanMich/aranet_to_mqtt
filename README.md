@@ -53,6 +53,11 @@ The `/data` volume persists sync state across restarts.
 | `CONNECT_RETRY_DELAY` | `10` | Seconds between connection retries |
 | `BLE_FETCH_TIMEOUT` | `120` | Seconds before a hung BLE fetch is aborted and retried |
 
+On repeated BLE failure, one poll cycle can stall for up to
+`CONNECT_RETRIES × BLE_FETCH_TIMEOUT + (CONNECT_RETRIES - 1) × CONNECT_RETRY_DELAY`
+seconds before the fetch is abandoned. With defaults that is 640 s (~10.7 min),
+followed by the normal `POLL_INTERVAL` wait before the next cycle.
+
 ## MQTT topic
 
 Each measurement is published to:
@@ -152,4 +157,5 @@ kubectl label node <node-name> bluetooth=true
 uv sync
 uv run ruff check .
 uv run ruff format --check .
+uv run pytest
 ```
