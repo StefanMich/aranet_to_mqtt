@@ -8,6 +8,7 @@ to a JSON state file so that restarts do not re-send old data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ DEVICE_NAME: str = os.environ.get("DEVICE_NAME", "rn_plus")
 PUBLISH_TIMEOUT: int = int(os.environ.get("PUBLISH_TIMEOUT", "30"))
 CONNECT_RETRIES: int = int(os.environ.get("CONNECT_RETRIES", "5"))
 CONNECT_RETRY_DELAY: int = int(os.environ.get("CONNECT_RETRY_DELAY", "10"))
+BLE_FETCH_TIMEOUT: int = int(os.environ.get("BLE_FETCH_TIMEOUT", "120"))
 
 _running = True
 
@@ -72,26 +74,46 @@ def save_state(ts: datetime) -> None:
     tmp.rename(STATE_FILE)
 
 
+async def _fetch_all_records_async(
+    mac: str,
+    entry_filter: dict[str, Any],
+) -> aranet4.client.Record:
+    async with asyncio.timeout(BLE_FETCH_TIMEOUT):
+        return await aranet4.client._all_records(mac, entry_filter, remove_empty=False)
+
+
+def _format_fetch_error(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if message:
+        return message
+    return f"{type(exc).__name__} (no message)"
+
+
 def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.RecordItem]:
     entry_filter: dict[str, Any] = {}
     if since is not None:
         entry_filter["start"] = since + timedelta(seconds=1)
     suffix = f" since {since.isoformat()}" if since else " (full history)"
     log.info(f"Fetching records{suffix}")
-    last_exc: Exception | None = None
+    last_exc: BaseException | None = None
     for attempt in range(1, CONNECT_RETRIES + 1):
+        log.info(f"BLE fetch attempt {attempt}/{CONNECT_RETRIES}")
         try:
-            history = aranet4.client.get_all_records(mac, entry_filter=entry_filter)
+            history = asyncio.run(_fetch_all_records_async(mac, entry_filter))
             log.info(f"Received {len(history.value)} records ({history.records_on_device} on device)")
             return history.value
+        except TimeoutError as exc:
+            last_exc = exc
+            detail = f"timed out after {BLE_FETCH_TIMEOUT}s"
         except Exception as exc:
             last_exc = exc
-            if attempt == CONNECT_RETRIES:
-                break
-            log.warning(
-                f"BLE fetch attempt {attempt}/{CONNECT_RETRIES} failed: {exc} — retrying in {CONNECT_RETRY_DELAY}s"
-            )
-            time.sleep(CONNECT_RETRY_DELAY)
+            detail = _format_fetch_error(exc)
+        if attempt == CONNECT_RETRIES:
+            break
+        log.warning(
+            f"BLE fetch attempt {attempt}/{CONNECT_RETRIES} failed: {detail} — retrying in {CONNECT_RETRY_DELAY}s"
+        )
+        time.sleep(CONNECT_RETRY_DELAY)
     raise RuntimeError(f"BLE fetch failed after {CONNECT_RETRIES} attempts") from last_exc
 
 
