@@ -37,10 +37,7 @@ def _mock_run(
 
 
 def test_format_fetch_error_empty_message_uses_type_name() -> None:
-    assert (
-        aranet_to_mqtt._format_fetch_error(aranet4.client.Aranet4Error(""))
-        == "Aranet4Error (no message)"
-    )
+    assert aranet_to_mqtt._format_fetch_error(aranet4.client.Aranet4Error("")) == "Aranet4Error (no message)"
 
 
 def test_fetch_all_records_async_times_out_when_all_records_is_slow() -> None:
