@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aranet4.client
 import pytest
@@ -21,23 +21,34 @@ def _mock_history(record_count: int = 1) -> MagicMock:
     return history
 
 
-def _close_coro(coro: object) -> None:
-    if asyncio.iscoroutine(coro):
-        coro.close()
+def _fail_then_succeed(
+    first: BaseException,
+    history: MagicMock,
+) -> Callable[..., Any]:
+    calls = {"n": 0}
+
+    async def fake_fetch(*_args: object, **_kwargs: object) -> MagicMock:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise first
+        return history
+
+    return fake_fetch
 
 
-def _mock_run(
-    handler: Callable[[object], Any],
-) -> Callable[[object], Any]:
-    def runner(coro: object) -> Any:
-        _close_coro(coro)
-        return handler(coro)
-
-    return runner
+def _run_fetch(
+    mac: str = "AA:BB:CC:DD:EE:FF",
+    since: datetime | None = None,
+) -> list[aranet4.client.RecordItem]:
+    return asyncio.run(aranet_to_mqtt.fetch_records(mac, since))
 
 
 def test_format_fetch_error_empty_message_uses_type_name() -> None:
     assert aranet_to_mqtt._format_fetch_error(aranet4.client.Aranet4Error("")) == "Aranet4Error (no message)"
+
+
+def test_format_fetch_error_dbus_eof_is_explicit() -> None:
+    assert aranet_to_mqtt._format_fetch_error(EOFError()) == "D-Bus connection lost (EOFError)"
 
 
 def test_fetch_all_records_async_times_out_when_all_records_is_slow() -> None:
@@ -58,79 +69,100 @@ def test_fetch_all_records_async_times_out_when_all_records_is_slow() -> None:
 
 def test_fetch_records_returns_on_first_success() -> None:
     history = _mock_history(2)
-    mock_run = MagicMock(side_effect=_mock_run(lambda _coro: history))
-    with patch("aranet_to_mqtt.asyncio.run", mock_run):
-        records = aranet_to_mqtt.fetch_records("AA:BB:CC:DD:EE:FF", None)
+    fake_fetch = AsyncMock(return_value=history)
+    with patch("aranet_to_mqtt._fetch_all_records_async", fake_fetch):
+        records = _run_fetch()
     assert records == history.value
-    mock_run.assert_called_once()
+    fake_fetch.assert_awaited_once()
 
 
 def test_fetch_records_retries_after_timeout_then_succeeds() -> None:
     history = _mock_history()
-    effects: list[object] = [TimeoutError(), history]
-    calls = 0
-
-    def handler(_coro: object) -> object:
-        nonlocal calls
-        effect = effects[calls]
-        calls += 1
-        if isinstance(effect, BaseException):
-            raise effect
-        return effect
-
-    mock_run = MagicMock(side_effect=_mock_run(handler))
     with (
-        patch("aranet_to_mqtt.asyncio.run", mock_run),
-        patch("aranet_to_mqtt.time.sleep") as mock_sleep,
+        patch(
+            "aranet_to_mqtt._fetch_all_records_async",
+            _fail_then_succeed(TimeoutError(), history),
+        ),
+        patch("aranet_to_mqtt._reset_bleak_bluez_manager") as mock_reset,
+        patch("aranet_to_mqtt.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         patch("aranet_to_mqtt.CONNECT_RETRIES", 3),
         patch("aranet_to_mqtt.CONNECT_RETRY_DELAY", 0),
     ):
-        records = aranet_to_mqtt.fetch_records("AA:BB:CC:DD:EE:FF", None)
+        records = _run_fetch()
     assert records == history.value
-    assert mock_run.call_count == 2
-    mock_sleep.assert_called_once_with(0)
+    mock_reset.assert_called_once()
+    mock_sleep.assert_awaited_once_with(0)
 
 
 def test_fetch_records_raises_after_all_timeouts() -> None:
-    def handler(_coro: object) -> object:
-        raise TimeoutError
-
     with (
-        patch("aranet_to_mqtt.asyncio.run", _mock_run(handler)),
-        patch("aranet_to_mqtt.time.sleep"),
+        patch(
+            "aranet_to_mqtt._fetch_all_records_async",
+            AsyncMock(side_effect=TimeoutError()),
+        ),
+        patch("aranet_to_mqtt._reset_bleak_bluez_manager") as mock_reset,
+        patch("aranet_to_mqtt.asyncio.sleep", new_callable=AsyncMock),
         patch("aranet_to_mqtt.CONNECT_RETRIES", 2),
         patch("aranet_to_mqtt.CONNECT_RETRY_DELAY", 0),
         pytest.raises(RuntimeError) as exc_info,
     ):
-        aranet_to_mqtt.fetch_records("AA:BB:CC:DD:EE:FF", None)
+        _run_fetch()
     assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert mock_reset.call_count == 2
 
 
 def test_fetch_records_retries_after_ble_error() -> None:
     history = _mock_history()
     ble_error = aranet4.client.Aranet4Error("device not found")
-    effects: list[object] = [ble_error, history]
-    calls = 0
-
-    def handler(_coro: object) -> object:
-        nonlocal calls
-        effect = effects[calls]
-        calls += 1
-        if isinstance(effect, BaseException):
-            raise effect
-        return effect
-
-    mock_run = MagicMock(side_effect=_mock_run(handler))
     with (
-        patch("aranet_to_mqtt.asyncio.run", mock_run),
-        patch("aranet_to_mqtt.time.sleep") as mock_sleep,
+        patch(
+            "aranet_to_mqtt._fetch_all_records_async",
+            _fail_then_succeed(ble_error, history),
+        ),
+        patch("aranet_to_mqtt._reset_bleak_bluez_manager") as mock_reset,
+        patch("aranet_to_mqtt.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         patch("aranet_to_mqtt.CONNECT_RETRIES", 3),
         patch("aranet_to_mqtt.CONNECT_RETRY_DELAY", 0),
     ):
-        records = aranet_to_mqtt.fetch_records("AA:BB:CC:DD:EE:FF", None)
+        records = _run_fetch()
     assert records == history.value
-    assert mock_run.call_count == 2
-    mock_sleep.assert_called_once_with(0)
+    mock_reset.assert_called_once()
+    mock_sleep.assert_awaited_once_with(0)
+
+
+def test_fetch_records_retries_after_dbus_eof_then_succeeds() -> None:
+    history = _mock_history()
+    with (
+        patch(
+            "aranet_to_mqtt._fetch_all_records_async",
+            _fail_then_succeed(EOFError(), history),
+        ),
+        patch("aranet_to_mqtt._reset_bleak_bluez_manager") as mock_reset,
+        patch("aranet_to_mqtt.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        patch("aranet_to_mqtt.CONNECT_RETRIES", 3),
+        patch("aranet_to_mqtt.CONNECT_RETRY_DELAY", 0),
+    ):
+        records = _run_fetch()
+    assert records == history.value
+    mock_reset.assert_called_once()
+    mock_sleep.assert_awaited_once_with(0)
+
+
+def test_fetch_records_raises_after_all_dbus_eofs() -> None:
+    with (
+        patch(
+            "aranet_to_mqtt._fetch_all_records_async",
+            AsyncMock(side_effect=EOFError()),
+        ),
+        patch("aranet_to_mqtt._reset_bleak_bluez_manager") as mock_reset,
+        patch("aranet_to_mqtt.asyncio.sleep", new_callable=AsyncMock),
+        patch("aranet_to_mqtt.CONNECT_RETRIES", 2),
+        patch("aranet_to_mqtt.CONNECT_RETRY_DELAY", 0),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        _run_fetch()
+    assert isinstance(exc_info.value.__cause__, EOFError)
+    assert mock_reset.call_count == 2
 
 
 def test_fetch_records_since_adds_start_filter() -> None:
@@ -143,11 +175,40 @@ def test_fetch_records_since_adds_start_filter() -> None:
         captured["entry_filter"] = entry_filter.copy()
         return history
 
-    with (
-        patch("aranet_to_mqtt._fetch_all_records_async", fake_fetch),
-        patch("aranet_to_mqtt.asyncio.run", wraps=asyncio.run),
-    ):
-        aranet_to_mqtt.fetch_records("AA:BB:CC:DD:EE:FF", since)
+    with patch("aranet_to_mqtt._fetch_all_records_async", fake_fetch):
+        asyncio.run(aranet_to_mqtt.fetch_records("AA:BB:CC:DD:EE:FF", since))
 
     assert captured["mac"] == "AA:BB:CC:DD:EE:FF"
     assert captured["entry_filter"]["start"] == since + aranet_to_mqtt.timedelta(seconds=1)
+
+
+def test_reset_bleak_bluez_manager_disconnects_cached_bus() -> None:
+    async def exercise() -> None:
+        from bleak.backends.bluezdbus.manager import _global_instances
+
+        loop = asyncio.get_running_loop()
+        bus = MagicMock()
+        manager = MagicMock()
+        manager._bus = bus
+        _global_instances[loop] = manager
+        aranet_to_mqtt._reset_bleak_bluez_manager()
+        assert loop not in _global_instances
+        bus.disconnect.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+def test_reset_bleak_bluez_manager_ignores_disconnect_errors() -> None:
+    async def exercise() -> None:
+        from bleak.backends.bluezdbus.manager import _global_instances
+
+        loop = asyncio.get_running_loop()
+        bus = MagicMock()
+        bus.disconnect.side_effect = OSError("already closed")
+        manager = MagicMock()
+        manager._bus = bus
+        _global_instances[loop] = manager
+        aranet_to_mqtt._reset_bleak_bluez_manager()
+        assert loop not in _global_instances
+
+    asyncio.run(exercise())
