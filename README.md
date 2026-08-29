@@ -58,6 +58,9 @@ On repeated BLE failure, one poll cycle can stall for up to
 seconds before the fetch is abandoned. With defaults that is 640 s (~10.7 min),
 followed by the normal `POLL_INTERVAL` wait before the next cycle.
 
+A dropped BlueZ D-Bus socket (`EOFError`) is treated as a transient failure:
+the cached BLE manager is reset and the fetch is retried on the same event loop.
+
 ## MQTT topic
 
 Each measurement is published to:
