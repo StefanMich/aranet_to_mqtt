@@ -51,6 +51,28 @@ def test_format_fetch_error_dbus_eof_is_explicit() -> None:
     assert aranet_to_mqtt._format_fetch_error(EOFError()) == "D-Bus connection lost (EOFError)"
 
 
+def test_fetch_all_records_async_slices_to_requested_range() -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_all_records(
+        mac: str,
+        entry_filter: dict[str, object],
+        remove_empty: bool,
+    ) -> MagicMock:
+        captured["mac"] = mac
+        captured["entry_filter"] = entry_filter
+        captured["remove_empty"] = remove_empty
+        return _mock_history()
+
+    async def exercise() -> None:
+        with patch("aranet_to_mqtt.aranet4.client._all_records", fake_all_records):
+            await aranet_to_mqtt._fetch_all_records_async("AA:BB:CC:DD:EE:FF", {})
+
+    asyncio.run(exercise())
+    assert captured["remove_empty"] is True
+    assert captured["mac"] == "AA:BB:CC:DD:EE:FF"
+
+
 def test_fetch_all_records_async_times_out_when_all_records_is_slow() -> None:
     async def slow_records(*_args: object, **_kwargs: object) -> MagicMock:
         await asyncio.sleep(999)
@@ -180,6 +202,9 @@ def test_fetch_records_since_adds_start_filter() -> None:
 
     assert captured["mac"] == "AA:BB:CC:DD:EE:FF"
     assert captured["entry_filter"]["start"] == since + aranet_to_mqtt.timedelta(seconds=1)
+    assert captured["entry_filter"]["humi"] is True
+    assert captured["entry_filter"]["temp"] is True
+    assert captured["entry_filter"]["pres"] is True
 
 
 def test_reset_bleak_bluez_manager_disconnects_cached_bus() -> None:
