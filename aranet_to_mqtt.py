@@ -42,6 +42,7 @@ PUBLISH_TIMEOUT: int = int(os.environ.get("PUBLISH_TIMEOUT", "30"))
 CONNECT_RETRIES: int = int(os.environ.get("CONNECT_RETRIES", "5"))
 CONNECT_RETRY_DELAY: int = int(os.environ.get("CONNECT_RETRY_DELAY", "10"))
 BLE_FETCH_TIMEOUT: int = int(os.environ.get("BLE_FETCH_TIMEOUT", "120"))
+_DBUS_TRANSPORT_ERRORS = (EOFError, BrokenPipeError, ConnectionResetError)
 
 _running = True
 
@@ -85,13 +86,44 @@ async def _fetch_all_records_async(
 
 
 def _format_fetch_error(exc: BaseException) -> str:
+    if isinstance(exc, _DBUS_TRANSPORT_ERRORS):
+        return f"D-Bus connection lost ({type(exc).__name__})"
     message = str(exc).strip()
     if message:
         return message
     return f"{type(exc).__name__} (no message)"
 
 
-def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.RecordItem]:
+def _reset_bleak_bluez_manager() -> None:
+    """Drop Bleak's cached BlueZ manager so the next scan opens a fresh D-Bus bus.
+
+    Bleak caches one BlueZManager per event loop. After the D-Bus socket dies
+    (EOFError), that instance is unusable until it is disconnected and removed.
+    """
+    try:
+        from bleak.backends.bluezdbus.manager import _global_instances
+    except ImportError:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    manager = _global_instances.pop(loop, None)
+    if manager is None:
+        return
+    bus = getattr(manager, "_bus", None)
+    if bus is None:
+        return
+    try:
+        bus.disconnect()
+    except Exception:
+        log.debug("Ignoring error while closing stale BlueZ D-Bus bus")
+
+
+async def fetch_records(
+    mac: str,
+    since: datetime | None,
+) -> list[aranet4.client.RecordItem]:
     entry_filter: dict[str, Any] = {}
     if since is not None:
         entry_filter["start"] = since + timedelta(seconds=1)
@@ -101,7 +133,7 @@ def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.Recor
     for attempt in range(1, CONNECT_RETRIES + 1):
         log.info(f"BLE fetch attempt {attempt}/{CONNECT_RETRIES}")
         try:
-            history = asyncio.run(_fetch_all_records_async(mac, entry_filter))
+            history = await _fetch_all_records_async(mac, entry_filter)
             log.info(f"Received {len(history.value)} records ({history.records_on_device} on device)")
             return history.value
         except TimeoutError as exc:
@@ -110,12 +142,13 @@ def fetch_records(mac: str, since: datetime | None) -> list[aranet4.client.Recor
         except Exception as exc:
             last_exc = exc
             detail = _format_fetch_error(exc)
+        _reset_bleak_bluez_manager()
         if attempt == CONNECT_RETRIES:
             break
         log.warning(
             f"BLE fetch attempt {attempt}/{CONNECT_RETRIES} failed: {detail} — retrying in {CONNECT_RETRY_DELAY}s"
         )
-        time.sleep(CONNECT_RETRY_DELAY)
+        await asyncio.sleep(CONNECT_RETRY_DELAY)
     raise RuntimeError(f"BLE fetch failed after {CONNECT_RETRIES} attempts") from last_exc
 
 
@@ -226,45 +259,48 @@ def main() -> None:
     log.info(f"  State file : {STATE_FILE}")
 
     client = connect_mqtt()
-
     try:
-        while _running:
-            last_ts = load_state()
-            try:
-                records = fetch_records(ARANET_MAC, last_ts)
-            except Exception:
-                log.exception("Failed to fetch records from device")
-                _sleep(POLL_INTERVAL)
-                continue
-
-            if not records:
-                log.info("No new records")
-                _sleep(POLL_INTERVAL)
-                continue
-
-            try:
-                latest = publish_records(client, records)
-            except Exception:
-                log.exception("Failed to publish records to MQTT")
-                _sleep(POLL_INTERVAL)
-                continue
-
-            if latest:
-                save_state(latest)
-                log.info(f"Synced up to {latest.isoformat()}")
-
-            _sleep(POLL_INTERVAL)
+        asyncio.run(_run_poll_loop(client))
     finally:
         client.loop_stop()
         client.disconnect()
         log.info("Shutdown complete")
 
 
-def _sleep(seconds: int) -> None:
+async def _run_poll_loop(client: mqtt.Client) -> None:
+    while _running:
+        last_ts = load_state()
+        try:
+            records = await fetch_records(ARANET_MAC, last_ts)
+        except Exception:
+            log.exception("Failed to fetch records from device")
+            await _sleep(POLL_INTERVAL)
+            continue
+
+        if not records:
+            log.info("No new records")
+            await _sleep(POLL_INTERVAL)
+            continue
+
+        try:
+            latest = publish_records(client, records)
+        except Exception:
+            log.exception("Failed to publish records to MQTT")
+            await _sleep(POLL_INTERVAL)
+            continue
+
+        if latest:
+            save_state(latest)
+            log.info(f"Synced up to {latest.isoformat()}")
+
+        await _sleep(POLL_INTERVAL)
+
+
+async def _sleep(seconds: int) -> None:
     """Sleep in small increments so signals can interrupt promptly."""
     end = time.monotonic() + seconds
     while _running and time.monotonic() < end:
-        time.sleep(min(1.0, end - time.monotonic()))
+        await asyncio.sleep(min(1.0, end - time.monotonic()))
 
 
 if __name__ == "__main__":
