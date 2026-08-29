@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,17 @@ def _record(
     return rec
 
 
+def _empty_record(ts: datetime) -> MagicMock:
+    sentinel = aranet_to_mqtt.NO_DATA_SENTINEL
+    return _record(
+        ts,
+        temperature=sentinel,
+        humidity=sentinel,
+        pressure=sentinel,
+        radon=sentinel,
+    )
+
+
 def _mock_publish_client() -> MagicMock:
     client = MagicMock()
     info = MagicMock()
@@ -37,7 +49,7 @@ def test_publish_records_returns_last_published_not_last_fetched() -> None:
     ts3 = datetime(2026, 1, 1, 12, 10, 0)
     records = [
         _record(ts1),
-        _record(ts2, radon=aranet_to_mqtt.NO_DATA_SENTINEL),
+        _empty_record(ts2),
         _record(ts3),
     ]
     client = _mock_publish_client()
@@ -53,7 +65,7 @@ def test_publish_records_does_not_advance_past_unpublished_tail() -> None:
     ts2 = datetime(2026, 1, 1, 12, 5, 0)
     records = [
         _record(ts1),
-        _record(ts2, temperature=aranet_to_mqtt.NO_DATA_SENTINEL),
+        _empty_record(ts2),
     ]
     client = _mock_publish_client()
 
@@ -66,7 +78,7 @@ def test_publish_records_does_not_advance_past_unpublished_tail() -> None:
 def test_publish_records_checkpoint_uses_last_published() -> None:
     base = datetime(2026, 1, 1, 12, 0, 0)
     records = [_record(base + timedelta(minutes=i)) for i in range(100)]
-    records.append(_record(base + timedelta(hours=1), radon=aranet_to_mqtt.NO_DATA_SENTINEL))
+    records.append(_empty_record(base + timedelta(hours=1)))
     client = _mock_publish_client()
 
     with patch("aranet_to_mqtt.save_state") as mock_save_state:
@@ -75,12 +87,27 @@ def test_publish_records_checkpoint_uses_last_published() -> None:
     mock_save_state.assert_called_once_with(base + timedelta(minutes=99))
 
 
-def test_publish_records_all_invalid_returns_none() -> None:
+def test_publish_records_all_empty_returns_none() -> None:
     ts = datetime(2026, 1, 1, 12, 0, 0)
-    records = [_record(ts, radon=aranet_to_mqtt.NO_DATA_SENTINEL)]
+    records = [_empty_record(ts)]
     client = _mock_publish_client()
 
     result = aranet_to_mqtt.publish_records(client, records)
 
     assert result is None
     client.publish.assert_not_called()
+
+
+def test_publish_records_publishes_partial_readings_as_null() -> None:
+    ts = datetime(2026, 1, 1, 12, 0, 0)
+    records = [_record(ts, radon=aranet_to_mqtt.NO_DATA_SENTINEL)]
+    client = _mock_publish_client()
+
+    result = aranet_to_mqtt.publish_records(client, records)
+
+    assert result == ts
+    payload = json.loads(client.publish.call_args.args[1])
+    assert payload["radon"] is None
+    assert payload["temperature"] == 20.0
+    assert payload["humidity"] == 50.0
+    assert payload["pressure"] == 1013.0

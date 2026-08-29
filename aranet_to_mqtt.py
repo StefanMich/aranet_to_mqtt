@@ -82,7 +82,9 @@ async def _fetch_all_records_async(
     # Uses aranet4 private API _all_records (validated against aranet4>=2.6.0).
     # Prefer a public timeout-aware API upstream if aranet4 adds one.
     async with asyncio.timeout(BLE_FETCH_TIMEOUT):
-        return await aranet4.client._all_records(mac, entry_filter, remove_empty=False)
+        # remove_empty slices to the requested time range. False keeps the
+        # full log, with -1 placeholders for indexes that were not fetched.
+        return await aranet4.client._all_records(mac, entry_filter, remove_empty=True)
 
 
 def _format_fetch_error(exc: BaseException) -> str:
@@ -124,7 +126,8 @@ async def fetch_records(
     mac: str,
     since: datetime | None,
 ) -> list[aranet4.client.RecordItem]:
-    entry_filter: dict[str, Any] = {}
+    # humi=True is required so aranet4 selects HUMIDITY2 for AranetRn+.
+    entry_filter: dict[str, Any] = {"temp": True, "humi": True, "pres": True}
     if since is not None:
         entry_filter["start"] = since + timedelta(seconds=1)
     suffix = f" since {since.isoformat()}" if since else " (full history)"
@@ -156,17 +159,22 @@ BATCH_CHECKPOINT_SIZE = 100
 NO_DATA_SENTINEL = -1
 
 
-def _has_invalid_reading(rec: aranet4.client.RecordItem) -> bool:
-    """Return True if any sensor field contains the aranet4 no-data sentinel."""
-    return any(
-        v == NO_DATA_SENTINEL
-        for v in (
-            rec.temperature,
-            rec.humidity,
-            rec.pressure,
-            rec.radon_concentration,
-        )
+def _sensor_values(rec: aranet4.client.RecordItem) -> tuple[float | int, ...]:
+    return (
+        rec.temperature,
+        rec.humidity,
+        rec.pressure,
+        rec.radon_concentration,
     )
+
+
+def _is_empty_reading(rec: aranet4.client.RecordItem) -> bool:
+    """Return True if every sensor field is the aranet4 no-data sentinel."""
+    return all(v == NO_DATA_SENTINEL for v in _sensor_values(rec))
+
+
+def _sensor_value(value: float | int) -> float | int | None:
+    return None if value == NO_DATA_SENTINEL else value
 
 
 def publish_records(
@@ -177,22 +185,23 @@ def publish_records(
 
     Saves state every BATCH_CHECKPOINT_SIZE publishes so that a crash
     mid-batch only requires re-sending the tail, not the full batch.
-    Skipped invalid records do not advance the sync cursor.
+    Empty placeholder records do not advance the sync cursor. A missing
+    individual field is published as null and still advances the cursor.
     """
     topic = f"{MQTT_TOPIC_PREFIX}/{DEVICE_NAME}/measurement"
     last_published: datetime | None = None
     published = 0
     for i, rec in enumerate(records, 1):
-        if _has_invalid_reading(rec):
-            log.debug(f"Skipping record {rec.date} with invalid sensor values")
+        if _is_empty_reading(rec):
+            log.debug(f"Skipping empty record {rec.date}")
             continue
         payload = json.dumps(
             {
                 "timestamp": rec.date.isoformat(),
-                "temperature": rec.temperature,
-                "humidity": rec.humidity,
-                "pressure": rec.pressure,
-                "radon": rec.radon_concentration,
+                "temperature": _sensor_value(rec.temperature),
+                "humidity": _sensor_value(rec.humidity),
+                "pressure": _sensor_value(rec.pressure),
+                "radon": _sensor_value(rec.radon_concentration),
             }
         )
         info = client.publish(topic, payload, qos=1)
@@ -205,8 +214,10 @@ def publish_records(
             save_state(last_published)
             log.info(f"Checkpoint at {i}/{len(records)} records")
     skipped = len(records) - published
+    if published:
+        log.info(f"Published {published} records")
     if skipped:
-        log.info(f"Skipped {skipped} records with invalid measurements")
+        log.info(f"Skipped {skipped} empty records")
     return last_published
 
 
@@ -250,6 +261,11 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
 
     log.info("Starting aranet-to-mqtt bridge")
+    initial = load_state()
+    if initial:
+        log.info(f"Resuming from {initial.isoformat()}")
+    else:
+        log.info("No saved cursor; fetching full device history")
     log.info(f"  Device MAC : {ARANET_MAC}")
     use_tls = MQTT_TLS if MQTT_TLS is not None else (MQTT_PORT == 8883)
     log.info(f"  MQTT broker: {MQTT_HOST}:{MQTT_PORT} (TLS: {use_tls})")
