@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import aranet_to_mqtt
 
 
@@ -111,3 +113,73 @@ def test_publish_records_publishes_partial_readings_as_null() -> None:
     assert payload["temperature"] == 20.0
     assert payload["humidity"] == 50.0
     assert payload["pressure"] == 1013.0
+
+
+def test_publish_records_payload_keeps_zero_on_the_device_topic() -> None:
+    ts = datetime(2026, 1, 1, 12, 0, 0)
+    records = [
+        _record(
+            ts,
+            temperature=0.0,
+            humidity=0,
+            pressure=0,
+            radon=0,
+        )
+    ]
+    client = _mock_publish_client()
+
+    with (
+        patch("aranet_to_mqtt.MQTT_TOPIC_PREFIX", "sensors"),
+        patch("aranet_to_mqtt.DEVICE_NAME", "lab"),
+    ):
+        result = aranet_to_mqtt.publish_records(client, records)
+
+    assert result == ts
+    args, kwargs = client.publish.call_args
+    assert args[0] == "sensors/lab/measurement"
+    assert kwargs["qos"] == 1
+    assert json.loads(args[1]) == {
+        "timestamp": ts.isoformat(),
+        "temperature": 0.0,
+        "humidity": 0,
+        "pressure": 0,
+        "radon": 0,
+    }
+
+
+def test_publish_records_checkpoint_counts_published_records() -> None:
+    base = datetime(2026, 1, 1, 12, 0, 0)
+    real_times = [base + timedelta(minutes=i) for i in range(101)]
+    records: list[MagicMock] = [_empty_record(base - timedelta(minutes=i + 1)) for i in range(10)]
+    records.extend(_record(ts) for ts in real_times)
+    client = _mock_publish_client()
+
+    with patch("aranet_to_mqtt.save_state") as mock_save_state:
+        result = aranet_to_mqtt.publish_records(client, records)
+
+    mock_save_state.assert_called_once_with(real_times[99])
+    assert result == real_times[100]
+    assert client.publish.call_count == 101
+
+
+def test_publish_timeout_keeps_the_earlier_checkpoint_only() -> None:
+    base = datetime(2026, 1, 1, 12, 0, 0)
+    records = [_record(base + timedelta(minutes=i)) for i in range(101)]
+    client = MagicMock()
+    calls = {"n": 0}
+
+    def publish(*_args: object, **_kwargs: object) -> MagicMock:
+        calls["n"] += 1
+        info = MagicMock()
+        info.is_published.return_value = calls["n"] <= 100
+        return info
+
+    client.publish.side_effect = publish
+
+    with (
+        patch("aranet_to_mqtt.save_state") as mock_save_state,
+        pytest.raises(TimeoutError),
+    ):
+        aranet_to_mqtt.publish_records(client, records)
+
+    mock_save_state.assert_called_once_with(records[99].date)
